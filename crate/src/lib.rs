@@ -91,14 +91,18 @@ pub fn verify(public_key_hex: &str, message: &[u8], signature_hex: &str) -> bool
     pk.verify(message, &sig).is_ok()
 }
 
-/// Derive a 32-byte identity fingerprint from a seed via the SDK's seed
-/// handling. Demonstrates deterministic identity derivation, client-side.
+/// Derive a 32-byte identity fingerprint from a secret key via BLAKE3.
+/// Demonstrates deterministic identity derivation, client-side.
+///
+/// Note: we use BLAKE3 directly rather than the SDK's `SeedHandle::fingerprint()`
+/// because `SeedHandle::new()` internally calls `std::time::SystemTime`, which
+/// panics on `wasm32-unknown-unknown` (no OS clock). BLAKE3 gives us the same
+/// deterministic-fingerprint property without the time dependency.
 #[wasm_bindgen]
-pub fn identity_fingerprint(seed_hex: &str) -> Result<String, JsError> {
-    use origin_crypto_sdk::SeedHandle;
-    let seed = hex::decode(seed_hex).map_err(err)?;
-    let handle = SeedHandle::new(&seed, None);
-    Ok(hex::encode(handle.fingerprint()))
+pub fn identity_fingerprint(secret_key_hex: &str) -> Result<String, JsError> {
+    let sk_bytes = hex::decode(secret_key_hex).map_err(err)?;
+    let hash = blake3::hash(&sk_bytes);
+    Ok(hex::encode(hash.as_bytes()))
 }
 
 // ─────────────────────────────────────────────────────────────────────────
