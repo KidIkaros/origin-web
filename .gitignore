@@ -14,3 +14,4 @@ spike/
 *.swp
 .idea/
 .vscode/
+test.mjs

@@ -111,9 +111,8 @@ $("id-verify").addEventListener("click", () => {
 });
 
 // ── Scenario 2: Envelope ──────────────────────────────────────────────
-let envSalt = random_salt();
+let envSalt = null; // generated after WASM init (random_salt needs the module)
 let envBlob = null;
-$("env-salt").textContent = `salt: ${envSalt}`;
 $("env-enc").addEventListener("click", () => {
   const pass = $("env-pass").value;
   if (!pass) {
@@ -265,6 +264,11 @@ async function main() {
   // Crypto engine is loaded. From this point, count every network request —
   // there will be none, because everything below runs locally in WASM.
   startNetWatch();
+
+  // Generate the envelope salt now that WASM is ready.
+  envSalt = random_salt();
+  $("env-salt").textContent = `salt: ${envSalt}`;
+
   render();
   console.log(
     "%corigin%cweb — crypto engine loaded. Watch the network tab: it stays empty.",
