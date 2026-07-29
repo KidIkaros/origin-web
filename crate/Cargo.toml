@@ -22,7 +22,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 # The real crypto. crates.io source + wasm feature (browser entropy via Web Crypto).
-origin-crypto-sdk = { version = "0.6.4", features = ["wasm"] }
+origin-crypto-sdk = { version = "0.6.5", features = ["wasm"] }
 
 # WASM <-> JS glue.
 wasm-bindgen = "0.2"
