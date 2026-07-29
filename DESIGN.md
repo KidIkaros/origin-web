@@ -289,9 +289,9 @@ callable from JS.
 - Responsive CSS, "what this proves" captions on each card.
 - Node.js smoke test validates all 12 bindings produce correct output.
 
-### Phase 4 — Announce
-- Link from origin-tools README + SDK README.
-- The demo URL becomes the "try it" button for the whole project.
+### Phase 4 — Announce ✅ DONE (2026-07-29)
+- Linked demo from origin-tools README (`f6853db`) and SDK README (`31c8c7f`).
+- Demo URL: https://kidikaros.github.io/origin-web — the "try it" button for the project.
 
 ---
 
