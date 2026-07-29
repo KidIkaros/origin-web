@@ -9,6 +9,9 @@ www/pkg/
 # Spike (Phase 0 throwaway feasibility crate — not shipped)
 spike/
 
+# Node (playwright for local testing only)
+node_modules/
+
 # Editor / OS noise
 .DS_Store
 *.swp
