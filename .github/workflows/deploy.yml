@@ -32,12 +32,6 @@ jobs:
       - name: Checkout origin-web
         uses: actions/checkout@v4
 
-      - name: Checkout origin-crypto-sdk (sibling path dep)
-        uses: actions/checkout@v4
-        with:
-          repository: KidIkaros/OriginSDK
-          path: origin-crypto-sdk
-
       - name: Install Rust + wasm target
         uses: dtolnay/rust-toolchain@stable
         with:
