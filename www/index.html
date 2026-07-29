@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Origin — cryptography that never leaves your machine</title>
+  <meta name="description" content="A client-side teaser for the Origin cryptographic suite. Every operation runs in your browser via WebAssembly. Zero network requests. Your keys never leave this tab." />
+  <link rel="stylesheet" href="style.css" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🔐</text></svg>" />
+</head>
+<body>
+
+  <!-- Persistent sovereignty banner: the claim, made verifiable -->
+  <div class="banner">
+    <div class="banner-inner">
+      <span class="pulse"></span>
+      <span class="net-count" id="netCount">0 network requests</span>
+      <span class="sep">·</span>
+      <span class="claim">keys never leave this tab</span>
+      <span class="sep">·</span>
+      <span class="claim">open devtools → network → see for yourself</span>
+    </div>
+  </div>
+
+  <div class="wrap">
+
+    <!-- Hero -->
+    <header class="hero">
+      <div class="eyebrow">Origin Cryptographic Suite</div>
+      <h1>Cryptography that<br /><span class="grad">never leaves your machine.</span></h1>
+      <p class="lede">
+        Everything on this page runs in <em>your</em> browser, compiled to
+        WebAssembly. No server. No account. No telemetry. Your keys are born in
+        this tab and die with it. This is a teaser — the full toolbox is
+        <strong>origin-tools</strong>.
+      </p>
+      <div class="cta-row">
+        <a class="btn btn-primary" href="https://github.com/KidIkaros/origin-tools" target="_blank" rel="noopener">Get origin-tools →</a>
+        <a class="btn btn-ghost" href="https://github.com/KidIkaros/OriginSDK" target="_blank" rel="noopener">Read the SDK</a>
+      </div>
+    </header>
+
+    <div class="section-head">
+      <h2>Try it. Right here. Right now.</h2>
+      <p>Four moments from the suite. Each one proves part of the thesis — and each one runs entirely on your device.</p>
+    </div>
+
+    <!-- Scenario 1: Identity -->
+    <section class="card" id="identity">
+      <h3><span class="num">01</span> Identity in your browser</h3>
+      <div class="proves">keypair generation, signing &amp; verification — offline</div>
+      <label>message to sign</label>
+      <input type="text" id="id-msg" value="I control my own keys." />
+      <div class="controls">
+        <button class="btn run" id="id-run">Generate keypair &amp; sign</button>
+        <button class="btn" id="id-verify">Verify signature</button>
+      </div>
+      <div class="output" id="id-out"></div>
+    </section>
+
+    <!-- Scenario 2: Envelope -->
+    <section class="card" id="envelope">
+      <h3><span class="num">02</span> The envelope</h3>
+      <div class="proves">passphrase → Argon2id → XChaCha20-Poly1305, client-side</div>
+      <label>secret message</label>
+      <textarea id="env-msg">The launch code is 0000. Just kidding — but this never left your device.</textarea>
+      <label>passphrase</label>
+      <input type="password" id="env-pass" placeholder="a strong passphrase…" />
+      <div class="controls">
+        <button class="btn run" id="env-enc">Encrypt</button>
+        <button class="btn" id="env-dec">Decrypt</button>
+        <span class="hint" id="env-salt"></span>
+      </div>
+      <div class="output" id="env-out"></div>
+    </section>
+
+    <!-- Scenario 3: Shards -->
+    <section class="card" id="shards">
+      <h3><span class="num">03</span> Shard a secret</h3>
+      <div class="proves">Reed-Solomon secret sharing — recover from any 3 of 5</div>
+      <label>secret to shard</label>
+      <input type="text" id="sh-msg" value="A secret worth splitting." />
+      <div class="controls">
+        <button class="btn run" id="sh-split">Split into 3-of-5</button>
+        <span class="hint">click shards below to lose them, then recover</span>
+      </div>
+      <div class="shards" id="sh-chips"></div>
+      <div class="controls">
+        <button class="btn" id="sh-recover">Recover from present shards</button>
+      </div>
+      <div class="output" id="sh-out"></div>
+    </section>
+
+    <!-- Scenario 4: Entropy -->
+    <section class="card" id="entropy">
+      <h3><span class="num">04</span> Entropy audit</h3>
+      <div class="proves">the SDK's real randomness analysis — Shannon, chi², bias</div>
+      <label>paste text, or mash your keyboard</label>
+      <textarea id="en-input" placeholder="Type random-looking text here, or hit 'sample'…"></textarea>
+      <div class="controls">
+        <button class="btn run" id="en-run">Analyze</button>
+        <button class="btn" id="en-sample-low">sample: low entropy</button>
+        <button class="btn" id="en-sample-high">sample: high entropy</button>
+      </div>
+      <div class="output show" id="en-out" style="display:none"></div>
+    </section>
+
+    <!-- Footer CTA -->
+    <footer>
+      <div class="cta-big">This was the teaser.</div>
+      <p>The full suite — nine tools, one binary, post-quantum by default — is a <code>cargo install</code> away.</p>
+      <div class="cta-row">
+        <a class="btn btn-primary" href="https://github.com/KidIkaros/origin-tools" target="_blank" rel="noopener">Explore origin-tools →</a>
+      </div>
+      <div class="fine">
+        Built with <a href="https://github.com/KidIkaros/OriginSDK" target="_blank" rel="noopener">origin-crypto-sdk</a> ·
+        Apache-2.0 · <span id="netCountFoot">0</span> requests made by this page
+      </div>
+    </footer>
+
+  </div>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,75 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Build the origin-web WASM module and deploy the static site to GitHub Pages.
+#
+# Runs on every push to main. The .wasm is built fresh here (never committed)
+# so the deployed artifact always reflects the current SDK + bindings.
+#
+# Pages serves the contents of www/ at:
+#   https://kidikaros.github.io/origin-web/
+
+name: deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Allow one concurrent deployment; cancel in-progress runs.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout origin-web
+        uses: actions/checkout@v4
+
+      - name: Checkout origin-crypto-sdk (sibling path dep)
+        uses: actions/checkout@v4
+        with:
+          repository: KidIkaros/OriginSDK
+          path: origin-crypto-sdk
+
+      - name: Install Rust + wasm target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            crate/target
+          key: ${{ runner.os }}-wasm-${{ hashFiles('crate/Cargo.toml') }}
+
+      - name: Build WASM module
+        run: ./build.sh
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: www
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
