@@ -228,3 +228,133 @@ pub fn entropy_analyze(data: &[u8]) -> String {
     })
     .to_string()
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// Tool: File encrypt / decrypt (binary I/O for the File API)
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Encrypt arbitrary bytes to a passphrase. Returns a binary blob:
+///   nonce (24 bytes) || ciphertext
+/// Designed for the browser File API — pass a Uint8Array, get one back.
+#[wasm_bindgen]
+pub fn file_encrypt(passphrase: &str, salt_hex: &str, data: &[u8]) -> Result<Vec<u8>, JsError> {
+    use origin_crypto_sdk::{Argon2id, XChaCha20Poly1305};
+    let salt_bytes = hex::decode(salt_hex).map_err(err)?;
+    let salt: [u8; 16] = salt_bytes
+        .try_into()
+        .map_err(|_| JsError::new("salt must be 16 bytes (32 hex chars)"))?;
+    let key = Argon2id::derive_key(passphrase.as_bytes(), &salt, false).map_err(err)?;
+    let nonce = origin_crypto_sdk::aead::generate_nonce();
+    let ct = XChaCha20Poly1305::encrypt(&key, &nonce, data).map_err(err)?;
+    let mut blob = Vec::with_capacity(24 + ct.len());
+    blob.extend_from_slice(&nonce);
+    blob.extend_from_slice(&ct);
+    Ok(blob)
+}
+
+/// Decrypt a blob produced by `file_encrypt`. Returns the plaintext bytes.
+#[wasm_bindgen]
+pub fn file_decrypt(passphrase: &str, salt_hex: &str, blob: &[u8]) -> Result<Vec<u8>, JsError> {
+    use origin_crypto_sdk::{Argon2id, XChaCha20Poly1305};
+    if blob.len() < 25 {
+        return Err(JsError::new("blob too short — need at least nonce + 1 byte"));
+    }
+    let salt_bytes = hex::decode(salt_hex).map_err(err)?;
+    let salt: [u8; 16] = salt_bytes
+        .try_into()
+        .map_err(|_| JsError::new("salt must be 16 bytes (32 hex chars)"))?;
+    let nonce: [u8; 24] = blob[..24].try_into().unwrap();
+    let ct = &blob[24..];
+    let key = Argon2id::derive_key(passphrase.as_bytes(), &salt, false).map_err(err)?;
+    XChaCha20Poly1305::decrypt(&key, &nonce, ct).map_err(err)
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Tool: Password strength + generation
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Score a password's strength. Returns JSON:
+///   { "score": 0-6, "label": "Very Weak"|"Weak"|"Moderate"|"Strong"|"Very Strong",
+///     "length": n, "variety": n, "hints": [...] }
+#[wasm_bindgen]
+pub fn password_strength(password: &str) -> String {
+    let len = password.len();
+    let mut variety = 0u32;
+    if password.chars().any(|c| c.is_ascii_lowercase()) { variety += 1; }
+    if password.chars().any(|c| c.is_ascii_uppercase()) { variety += 1; }
+    if password.chars().any(|c| c.is_ascii_digit()) { variety += 1; }
+    if password.chars().any(|c| !c.is_ascii_alphanumeric()) { variety += 1; }
+
+    let len_score = if len >= 16 { 3 } else if len >= 12 { 2 } else if len >= 8 { 1 } else { 0 };
+    let score = variety + len_score;
+
+    let label = match score {
+        0..=1 => "Very Weak",
+        2 => "Weak",
+        3..=4 => "Moderate",
+        5 => "Strong",
+        _ => "Very Strong",
+    };
+
+    let mut hints = Vec::new();
+    if len < 8 { hints.push("use at least 8 characters"); }
+    if len < 12 { hints.push("12+ characters recommended"); }
+    if variety < 3 { hints.push("mix upper, lower, digits, symbols"); }
+    if password.chars().any(|c| c.is_whitespace()) { hints.push("avoid whitespace"); }
+
+    serde_json::json!({
+        "score": score,
+        "label": label,
+        "length": len,
+        "variety": variety,
+        "hints": hints,
+    })
+    .to_string()
+}
+
+/// Generate a cryptographically random password.
+/// `length` is clamped to [8, 128]. `use_symbols` includes !@#$%^&* etc.
+#[wasm_bindgen]
+pub fn generate_password(length: u32, use_symbols: bool) -> String {
+    use rand::RngCore;
+    let len = length.clamp(8, 128) as usize;
+    let lower = b"abcdefghijklmnopqrstuvwxyz";
+    let upper = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    let digits = b"0123456789";
+    let symbols = b"!@#$%^&*()-_=+[]{};:,.<>?";
+
+    let mut charset = Vec::from(lower);
+    charset.extend_from_slice(upper);
+    charset.extend_from_slice(digits);
+    if use_symbols {
+        charset.extend_from_slice(symbols);
+    }
+
+    let mut rng = rand::rngs::OsRng;
+    let mut buf = [0u8; 1];
+    let mut password = String::with_capacity(len);
+
+    // Guarantee at least one of each required class
+    let mut required: Vec<u8> = Vec::new();
+    required.push(lower[rng.next_u32() as usize % lower.len()]);
+    required.push(upper[rng.next_u32() as usize % upper.len()]);
+    required.push(digits[rng.next_u32() as usize % digits.len()]);
+    if use_symbols {
+        required.push(symbols[rng.next_u32() as usize % symbols.len()]);
+    }
+
+    for _ in 0..len {
+        rng.fill_bytes(&mut buf);
+        password.push(charset[buf[0] as usize % charset.len()] as char);
+    }
+
+    // Splice in the required chars at random positions
+    let mut chars: Vec<char> = password.chars().collect();
+    for (i, &rc) in required.iter().enumerate() {
+        let pos = (rng.next_u32() as usize) % chars.len();
+        chars[pos] = rc as char;
+        let _ = i;
+    }
+
+    chars.into_iter().collect()
+}

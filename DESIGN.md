@@ -9,51 +9,50 @@
 
 ## 1. Purpose
 
-`origin-web` is a **100% client-side teaser** for the Origin cryptographic
-suite, compiled to WebAssembly and served as a static site on GitHub Pages. It
-exists to *prove* the suite's central claim — that key material never has to
-leave your machine — by letting a visitor run the real crypto in their own
-browser tab with **zero network requests**.
+`origin-web` is the **lightweight web version of origin-crypt** — a fully
+client-side cryptographic toolkit compiled to WebAssembly and served as a
+static site on GitHub Pages. It runs the real Origin crypto engine in the
+browser with **zero network requests**, proving the suite's central claim:
+key material never has to leave your machine.
 
-It is a **polished marketing teaser with a developer-playground flavor**: a
-narrative-led page that shows off what `origin-tools` can do, with interactive
-moments that let visitors feel it themselves. It is **not** the developer
-playground itself — that role belongs to `origin-tools` (the real CLI suite).
-This page's job is to make people *want* the real thing. It is not a backend
-and never holds anyone's keys.
+It is a **working tool**, not a demo. Users encrypt files, manage passwords,
+sign messages, split secrets, and audit entropy — all locally. The integrity
+console (network counter, storage audit, WASM hash verification) is built in
+so the "nothing leaves this tab" claim is verifiable, not asserted.
 
-### Positioning vs. origin-tools
+### Positioning vs. origin-crypt / origin-tools
 
-| | origin-web (this) | origin-tools |
+| | origin-web (this) | origin-crypt CLI/TUI/GUI |
 |---|---|---|
-| Role | Teaser / marketing proof | Developer playground / real tool |
-| Audience | Curious visitors, evaluators | Developers, operators |
-| Surface | 4 curated moments | Full 9-tool CLI suite |
-| Depth | "Look what's possible" | "Here's the whole toolbox" |
-| CTA | → go get origin-tools | — (it's the destination) |
+| Role | Lightweight web tool | Full-featured native app |
+| Audience | Anyone with a browser | Power users, operators |
+| Surface | 5 tool tabs | Full CLI + TUI + GUI |
+| Depth | Encrypt, vault, sign, share, entropy | + deniable volumes, paranoid shred, recursive ops |
+| Install | Zero — open the URL | Cargo install / binary download |
+| Persistence | IndexedDB (encrypted, client-side) | Filesystem |
 
-Every scenario here ends by pointing at the equivalent `origin-tools` command.
-The teaser sells; the CLI delivers.
+The web version covers the 80% use case with zero install. The CLI keeps the
+power-user features that require filesystem access or OS-level operations.
 
 ### 1.1 The one rule
 
-> No server ever sees key material, plaintext, or passphrases. The demo runs
-> entirely in the visitor's browser. A live "network requests: 0" counter is
-> part of the UI so the claim is verifiable, not asserted.
+> No server ever sees key material, plaintext, or passphrases. Everything runs
+> in the visitor's browser. A live "network requests: 0" counter, storage
+> audit, and WASM hash verification are part of the UI so the claim is
+> verifiable, not asserted.
 
 This rule is the whole point. Any design decision that would weaken it is
 rejected by default.
 
 ### 1.2 Non-goals
 
-- **No "origin-tools as a service."** A server that holds keys recreates the
-  exact centralized trust model the suite exists to avoid. This is a hard no,
-  not a "later."
-- **No account system, no persistence, no telemetry.**
-- **No attempt to expose the full CLI surface.** We demo the four moments that
-  prove the thesis (see §5), not all nine tools.
-- **No production secret management.** The browser is a demo sandbox; real use
-  is the native CLI.
+- **No "crypto as a service."** A server that holds keys recreates the exact
+  centralized trust model the suite exists to avoid. Hard no, not "later."
+- **No account system, no telemetry, no analytics.**
+- **No server-side persistence.** The vault uses IndexedDB — encrypted at rest,
+  client-side only. Close the tab and the key is gone.
+- **No deniable volumes or paranoid shred.** These require filesystem access
+  and OS-level operations that don't exist in a browser sandbox.
 
 ---
 
@@ -185,31 +184,35 @@ in CI and shipped to Pages.
 
 ---
 
-## 5. Demo scenarios
+## 5. Tool features
 
-Four moments, chosen because each proves part of the thesis and is visually
-satisfying. Not the whole suite — the moments that tell the story.
+Five tool tabs, each a working feature backed by the WASM crypto engine.
 
-### 5.1 Identity in your browser
-Generate a keypair, show the fingerprint, sign a message, verify it.
-**Punchline:** a live "network requests: 0" counter. Your keys were born in
-this tab and die with it.
+### 5.1 File Encryption
+Drag-drop or browse for a file, enter a passphrase, encrypt or decrypt.
+XChaCha20-Poly1305 + Argon2id KDF. The file never leaves the tab — all
+crypto runs in WASM. Encrypted output downloads as a `.orgn` file.
 
-### 5.2 The envelope
-Type a secret, encrypt it to a passphrase, watch the ORGN binary format
-assemble byte-by-byte (live hex dump). Decrypt it back. Shows the format is
-real and self-contained.
+### 5.2 Password Vault
+Client-side encrypted password store using AES-256-GCM + IndexedDB. The
+encryption key is derived from the user's passphrase via PBKDF2 and never
+stored. Add, view, copy, and delete entries. Close the tab and the key is
+gone; reopen and unlock to access entries.
 
-### 5.3 Shard a secret
-Split a secret into 3-of-5, visually drop two shards, recover from the rest.
-Reed-Solomon is inherently demo-able and instantly understood.
+### 5.3 Identity & Signing
+Generate an Ed25519 keypair, sign messages, verify signatures. Shows the
+public key, BLAKE3 fingerprint, and signature. Keys are born in the tab
+and never transmitted.
 
-### 5.4 Entropy audit
-Paste text or mash the keyboard; watch Shannon entropy, chi-squared, and
-min-entropy update live. Interactive, zero crypto risk, fun.
+### 5.4 Threshold Sharing
+Split a secret into K-of-N shards using Reed-Solomon erasure coding.
+Visualize shards as clickable chips — click to simulate loss, then recover
+from the remaining shards. Any K data shards can reconstruct the original.
 
-Each scenario is a self-contained card/section with: a short "what this proves"
-caption, the interactive controls, and the live output.
+### 5.5 Entropy Analysis
+Measure Shannon entropy, min-entropy, chi-squared, serial correlation, and
+bit balance of any input. Preset buttons for low-entropy and high-entropy
+samples. Useful for verifying password strength or random source quality.
 
 ---
 
@@ -293,6 +296,17 @@ callable from JS.
 - Linked demo from origin-tools README (`f6853db`) and SDK README (`31c8c7f`).
 - Demo URL: https://kidikaros.github.io/origin-web — the "try it" button for the project.
 
+### Phase 5 — Tool pivot ✅ DONE (2026-07-30)
+- Repositioned from marketing teaser to **lightweight web version of origin-crypt**.
+- Upgraded WASM crate to SDK 0.6.6; added 4 new bindings: `encrypt_bytes`,
+  `decrypt_bytes`, `password_strength`, `generate_password` (16 total exports).
+- Rebuilt frontend as tab-based tool UI: Encrypt, Vault, Identity, Share, Entropy.
+- Added client-side password vault (AES-256-GCM + IndexedDB, PBKDF2 key derivation).
+- Added file encryption (drag-drop, XChaCha20-Poly1305 + Argon2id via WASM).
+- Integrity console: network counter, storage audit, WASM hash verification, session ledger.
+- WASM artifact: 269KB (release, opt-level=s, lto).
+- Updated DESIGN.md to reflect tool positioning.
+
 ---
 
 ## 10. Open questions
@@ -364,3 +378,12 @@ needs to be excluded or defaulted. The Phase 0 exit criterion is met.
 - **2026-07-28:** No algorithm is pre-excluded or pre-defaulted for WASM. The
   Phase 0 spike fills the §12 capability matrix empirically; scoping decisions
   follow the data.
+- **2026-07-30:** Pivoted from marketing teaser to lightweight web tool.
+  Rationale: a demo is a dead end — zero utility, zero retention. A working
+  tool proves the SDK's sovereign-crypto thesis by actually being useful.
+  The CLI keeps power-user features (deniable volumes, paranoid shred,
+  recursive ops); the web version covers the 80% use case with zero install.
+- **2026-07-30:** Vault uses Web Crypto (AES-256-GCM + PBKDF2) + IndexedDB
+  rather than WASM for storage encryption. Rationale: Web Crypto is
+  browser-native, zero-overhead, and the key never leaves memory. WASM
+  handles the Origin-specific crypto (Argon2id, XChaCha20-Poly1305, Reed-Solomon).

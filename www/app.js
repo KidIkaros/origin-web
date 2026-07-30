@@ -1,20 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
-// origin-web frontend.
+// origin-web — lightweight web version of origin-crypt.
 //
-// The page's thesis is "nothing leaves this tab" — so the code is built to
-// PROVE that, not assert it:
-//
-//   1. Monitors (fetch / XHR / WebSocket / beacon / service worker) are armed
-//      at the TOP of this module, before the crypto engine even loads.
-//   2. The engine bytes are fetched once, hashed with SHA-256 in-tab, and the
-//      SAME buffer is executed — then the hash is cross-checked against the
-//      CI-written build manifest (build-info.json).
-//   3. A storage audit (localStorage / sessionStorage / cookies / IndexedDB)
-//      runs continuously and per-operation, proving nothing is persisted.
-//   4. Every crypto operation appends a receipt to the session ledger with
-//      its own proof line: elapsed time, network delta, storage delta.
+// Architecture: WASM crypto engine (origin-crypto-sdk) runs entirely in-tab.
+// Network + storage monitors prove nothing leaves the browser.
+// Vault uses IndexedDB with AES-256-GCM (Web Crypto) for at-rest encryption.
 
-// ── 0. IMPORTS — the WASM crypto engine ───────────────────────────────
 import {
   initSync,
   keygen,
@@ -23,13 +13,18 @@ import {
   identity_fingerprint,
   envelope_encrypt,
   envelope_decrypt,
+  file_encrypt,
+  file_decrypt,
   shard_split,
   shard_recover,
   entropy_analyze,
   random_salt,
+  password_strength,
+  generate_password,
+  blake3_hash,
 } from "./pkg/origin_web.js";
 
-// ── 1. ARM MONITORS FIRST — before anything else in this module ───────
+// ── 0. ARM MONITORS — before anything else ──────────────────────────
 const net = { total: 0, afterLoad: 0, engineFetches: 0, violations: [] };
 let engineLoaded = false;
 
@@ -86,11 +81,10 @@ if (navigator.serviceWorker?.register) {
   };
 }
 
-// ── Storage audit ─────────────────────────────────────────────────────
+// ── Storage audit ───────────────────────────────────────────────────
 const store = { baseline: null, bytes: 0, entries: 0 };
 function storageBytes() {
-  let bytes = 0;
-  let entries = 0;
+  let bytes = 0, entries = 0;
   for (const s of [localStorage, sessionStorage]) {
     for (let i = 0; i < s.length; i++) {
       const k = s.key(i);
@@ -116,7 +110,7 @@ async function auditStorage() {
   return store.bytes;
 }
 
-// ── DOM helpers ───────────────────────────────────────────────────────
+// ── DOM helpers ─────────────────────────────────────────────────────
 const $ = (id) => document.getElementById(id);
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -147,8 +141,13 @@ function withBusy(btn, fn) {
     btn.classList.remove("busy");
   }
 }
+function formatBytes(n) {
+  if (n < 1024) return `${n} B`;
+  if (n < 1048576) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1048576).toFixed(1)} MB`;
+}
 
-// ── Console + ledger rendering ────────────────────────────────────────
+// ── Console + ledger rendering ──────────────────────────────────────
 function renderConsole() {
   const netEl = $("c-net-n");
   netEl.textContent = engineLoaded ? String(net.afterLoad) : "…";
@@ -156,14 +155,14 @@ function renderConsole() {
   netEl.parentElement.classList.toggle("bad", net.afterLoad > 0);
   $("c-store-n").textContent = store.baseline === null ? "…" : `${store.bytes} B`;
   $("c-store-n").parentElement.classList.toggle("ok", store.baseline !== null && store.bytes === 0);
-  $("foot-req").textContent = engineLoaded ? String(net.afterLoad) : "…";
-  $("foot-store").textContent = store.baseline === null ? "…" : `${store.bytes} B`;
+  $("foot-req").textContent = engineLoaded ? `net: ${net.afterLoad}` : "net: …";
+  $("foot-store").textContent = store.baseline === null ? "store: …" : `store: ${store.bytes} B`;
   const detail = $("console-detail");
   if (net.violations.length) {
     detail.textContent = "⚠ unexpected request: " + net.violations[0];
     detail.classList.add("bad");
   } else if (engineLoaded) {
-    detail.textContent = `engine loaded (${net.engineFetches} fetches) · hash checked against manifest · watching for leaks`;
+    detail.textContent = `engine loaded (${net.engineFetches} fetches) · hash checked · watching for leaks`;
   } else {
     detail.textContent = "loading engine — every request from here is counted…";
   }
@@ -187,7 +186,6 @@ function ledger(op, ms, netDelta, storeDelta) {
   body.prepend(row);
 }
 
-// Proof line appended to every receipt — the per-operation burden of proof.
 async function proofLine(ms) {
   const netDelta = net.afterLoad - proofLine._net;
   const storeDelta = (await auditStorage()) - proofLine._store;
@@ -203,11 +201,290 @@ function proofMark() {
   proofLine._store = store.bytes;
 }
 
-// ── Scenario 1: Identity ──────────────────────────────────────────────
+// ── Tab navigation ──────────────────────────────────────────────────
+document.querySelectorAll(".tab").forEach((tab) => {
+  tab.addEventListener("click", () => {
+    document.querySelectorAll(".tab").forEach((t) => t.classList.remove("active"));
+    document.querySelectorAll(".tool-panel").forEach((p) => p.classList.remove("active"));
+    tab.classList.add("active");
+    $(`tab-${tab.dataset.tab}`).classList.add("active");
+  });
+});
+
+// ═══ TAB 1: Encrypt ═════════════════════════════════════════════════
+let encFileData = null;
+let encFileName = "";
+let encSalt = null;
+
+$("enc-file").addEventListener("change", (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  encFileName = file.name;
+  $("enc-filename").textContent = `${file.name} (${formatBytes(file.size)})`;
+  file.arrayBuffer().then((buf) => {
+    encFileData = new Uint8Array(buf);
+    updateEncButtons();
+  });
+});
+
+// Drag-and-drop
+const dropZone = $("enc-drop");
+dropZone.addEventListener("dragover", (e) => { e.preventDefault(); dropZone.classList.add("dragover"); });
+dropZone.addEventListener("dragleave", () => dropZone.classList.remove("dragover"));
+dropZone.addEventListener("drop", (e) => {
+  e.preventDefault();
+  dropZone.classList.remove("dragover");
+  const file = e.dataTransfer.files[0];
+  if (!file) return;
+  encFileName = file.name;
+  $("enc-filename").textContent = `${file.name} (${formatBytes(file.size)})`;
+  file.arrayBuffer().then((buf) => {
+    encFileData = new Uint8Array(buf);
+    updateEncButtons();
+  });
+});
+
+function updateEncButtons() {
+  const hasPass = $("enc-pass").value.length > 0;
+  $("enc-btn").disabled = !(encFileData && hasPass);
+  $("dec-btn").disabled = !(encFileData && hasPass);
+}
+$("enc-pass").addEventListener("input", updateEncButtons);
+
+$("enc-btn").addEventListener("click", async () => {
+  if (!encFileData || !$("enc-pass").value) return;
+  await withBusy($("enc-btn"), async () => {
+    proofMark();
+    const t0 = performance.now();
+    try {
+      const blob = file_encrypt($("enc-pass").value, encSalt, encFileData);
+      const ms = (performance.now() - t0).toFixed(0);
+      const outName = encFileName + ".enc";
+      downloadBlob(new Blob([blob]), outName);
+      show($("enc-out"),
+        `<span class="ok">✓ Encrypted ${formatBytes(encFileData.length)} → ${formatBytes(blob.length)}</span>\n\n` +
+        `<span class="k">file</span>      ${esc(encFileName)}\n` +
+        `<span class="k">output</span>    ${esc(outName)}\n` +
+        `<span class="k">cipher</span>    XChaCha20-Poly1305\n` +
+        `<span class="k">kdf</span>       Argon2id (salt: ${encSalt.slice(0, 8)}…)\n\n` +
+        `<span class="dim">Download started. The encrypted file can only be decrypted with the same passphrase + salt.</span>` +
+        (await proofLine(ms))
+      );
+      ledger(`encrypt ${encFileName} (${formatBytes(encFileData.length)})`, ms, 0, 0);
+    } catch (e) {
+      show($("enc-out"), `<span class="bad">✗ ${esc(String(e))}</span>`);
+    }
+  });
+});
+
+$("dec-btn").addEventListener("click", async () => {
+  if (!encFileData || !$("enc-pass").value) return;
+  await withBusy($("dec-btn"), async () => {
+    proofMark();
+    const t0 = performance.now();
+    try {
+      const pt = file_decrypt($("enc-pass").value, encSalt, encFileData);
+      const ms = (performance.now() - t0).toFixed(0);
+      const outName = encFileName.replace(/\.enc$/, "") || "decrypted";
+      downloadBlob(new Blob([pt]), outName);
+      show($("enc-out"),
+        `<span class="ok">✓ Decrypted ${formatBytes(encFileData.length)} → ${formatBytes(pt.length)}</span>\n\n` +
+        `<span class="k">output</span>    ${esc(outName)}\n\n` +
+        `<span class="dim">Download started.</span>` +
+        (await proofLine(ms))
+      );
+      ledger(`decrypt ${encFileName} (${formatBytes(encFileData.length)})`, ms, 0, 0);
+    } catch (e) {
+      const ms = (performance.now() - t0).toFixed(0);
+      show($("enc-out"),
+        `<span class="bad">✗ Decryption failed: ${esc(String(e))}</span>\n` +
+        `<span class="dim">Wrong passphrase or corrupted file — the AEAD tag refused.</span>` +
+        (await proofLine(ms))
+      );
+      ledger(`decrypt (refused)`, ms, 0, 0);
+    }
+  });
+});
+
+function downloadBlob(blob, name) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
+}
+
+// ═══ TAB 2: Vault ═══════════════════════════════════════════════════
+const VAULT_DB = "origin-vault";
+const VAULT_STORE = "entries";
+let vaultKey = null;
+let vaultIv = null;
+
+async function deriveVaultKey(passphrase) {
+  const keyMaterial = await crypto.subtle.importKey("raw", enc.encode(passphrase), "PBKDF2", false, ["deriveKey"]);
+  const salt = enc.encode("origin-vault-v1"); // fixed salt — the passphrase is the secret
+  return crypto.subtle.deriveKey(
+    { name: "PBKDF2", salt, iterations: 100000, hash: "SHA-256" },
+    keyMaterial,
+    { name: "AES-GCM", length: 256 },
+    false,
+    ["encrypt", "decrypt"]
+  );
+}
+
+function openVaultDB() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(VAULT_DB, 1);
+    req.onupgradeneeded = () => req.result.createObjectStore(VAULT_STORE, { keyPath: "name" });
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function vaultGetAll() {
+  const db = await openVaultDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(VAULT_STORE, "readonly");
+    const req = tx.objectStore(VAULT_STORE).getAll();
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function vaultPut(entry) {
+  const db = await openVaultDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(VAULT_STORE, "readwrite");
+    tx.objectStore(VAULT_STORE).put(entry);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+async function vaultDelete(name) {
+  const db = await openVaultDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(VAULT_STORE, "readwrite");
+    tx.objectStore(VAULT_STORE).delete(name);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+async function encryptEntry(value) {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, vaultKey, enc.encode(value));
+  return { iv: [...iv], data: [...new Uint8Array(ct)] };
+}
+
+async function decryptEntry(entry) {
+  const iv = new Uint8Array(entry.iv);
+  const data = new Uint8Array(entry.data);
+  const pt = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, vaultKey, data);
+  return dec.decode(pt);
+}
+
+$("vault-unlock").addEventListener("click", async () => {
+  const pass = $("vault-pass").value;
+  if (!pass) { show($("vault-out"), `<span class="bad">Enter a passphrase.</span>`); return; }
+  proofMark();
+  const t0 = performance.now();
+  try {
+    vaultKey = await deriveVaultKey(pass);
+    // Test decrypt — try to read existing entries
+    const entries = await vaultGetAll();
+    let decrypted = 0;
+    for (const e of entries) {
+      try { await decryptEntry(e); decrypted++; } catch { /* wrong key or corrupt */ }
+    }
+    const ms = (performance.now() - t0).toFixed(0);
+    $("vault-unlock").disabled = true;
+    $("vault-lock").disabled = false;
+    $("vault-entries").hidden = false;
+    show($("vault-out"),
+      `<span class="ok">✓ Vault unlocked</span>\n\n` +
+      `<span class="k">entries</span>   ${entries.length}\n` +
+      `<span class="k">decryptable</span> ${decrypted}\n` +
+      `<span class="k">cipher</span>    AES-256-GCM\n` +
+      `<span class="k">kdf</span>       PBKDF2-SHA256 (100k iterations)\n` +
+      `<span class="k">storage</span>   IndexedDB (encrypted at rest)\n\n` +
+      `<span class="dim">The key exists only in memory. Lock or close the tab to destroy it.</span>` +
+      (await proofLine(ms))
+    );
+    ledger("vault unlock", ms, 0, 0);
+    renderVaultList();
+  } catch (e) {
+    show($("vault-out"), `<span class="bad">✗ ${esc(String(e))}</span>`);
+  }
+});
+
+$("vault-lock").addEventListener("click", () => {
+  vaultKey = null;
+  $("vault-unlock").disabled = false;
+  $("vault-lock").disabled = true;
+  $("vault-entries").hidden = true;
+  $("vault-pass").value = "";
+  show($("vault-out"), `<span class="dim"># Vault locked. Key destroyed.</span>`);
+});
+
+$("vault-add").addEventListener("click", async () => {
+  const name = $("vault-name").value.trim();
+  const secret = $("vault-secret").value;
+  if (!name || !secret) return;
+  proofMark();
+  const t0 = performance.now();
+  const encrypted = await encryptEntry(secret);
+  await vaultPut({ name, ...encrypted });
+  const ms = (performance.now() - t0).toFixed(0);
+  $("vault-name").value = "";
+  $("vault-secret").value = "";
+  renderVaultList();
+  ledger(`vault add "${name}"`, ms, 0, 0);
+});
+
+async function renderVaultList() {
+  const entries = await vaultGetAll();
+  const list = $("vault-list");
+  list.innerHTML = "";
+  for (const e of entries) {
+    let value = "••••••••";
+    try { value = await decryptEntry(e); } catch { value = "(decrypt error)"; }
+    const row = document.createElement("div");
+    row.className = "vault-row";
+    row.innerHTML =
+      `<span class="vault-name">${esc(e.name)}</span>` +
+      `<code class="vault-value">${esc(value)}</code>` +
+      `<button class="btn small vault-copy" data-name="${esc(e.name)}">copy</button>` +
+      `<button class="btn small danger vault-del" data-name="${esc(e.name)}">✕</button>`;
+    list.appendChild(row);
+  }
+  // Wire buttons
+  list.querySelectorAll(".vault-copy").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const entry = (await vaultGetAll()).find((e) => e.name === btn.dataset.name);
+      if (entry) {
+        const val = await decryptEntry(entry);
+        navigator.clipboard.writeText(val);
+        btn.textContent = "✓";
+        setTimeout(() => (btn.textContent = "copy"), 1500);
+      }
+    });
+  });
+  list.querySelectorAll(".vault-del").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      await vaultDelete(btn.dataset.name);
+      renderVaultList();
+    });
+  });
+}
+
+// ═══ TAB 3: Identity ════════════════════════════════════════════════
 let idKeys = null;
 let idSig = null;
-$("id-run").addEventListener("click", async () => {
-  await withBusy($("id-run"), async () => {
+
+$("id-keygen").addEventListener("click", async () => {
+  await withBusy($("id-keygen"), async () => {
     proofMark();
     const t0 = performance.now();
     const msg = enc.encode($("id-msg").value);
@@ -216,17 +493,18 @@ $("id-run").addEventListener("click", async () => {
     const fp = identity_fingerprint(idKeys.secret_key);
     const ms = (performance.now() - t0).toFixed(0);
     $("id-verify").disabled = false;
-    show(
-      $("id-out"),
+    show($("id-out"),
+      `<span class="ok">✓ Keypair generated + message signed</span>\n\n` +
       `<span class="k">public_key</span>   ${idKeys.public_key}\n` +
-        `<span class="k">fingerprint</span>    ${fp}\n` +
-        `<span class="k">signature</span>      ${idSig}\n\n` +
-        `<span class="dim">Born in this tab. Never sent anywhere. Verify it ↓</span>` +
-        (await proofLine(ms))
+      `<span class="k">fingerprint</span>    ${fp}\n` +
+      `<span class="k">signature</span>      ${idSig.slice(0, 64)}…\n\n` +
+      `<span class="dim">Born in this tab. Never sent anywhere. Verify it ↓</span>` +
+      (await proofLine(ms))
     );
-    ledger("ed25519 keygen + sign", ms, net.afterLoad - proofLine._net, 0);
+    ledger("ed25519 keygen + sign", ms, 0, 0);
   });
 });
+
 $("id-verify").addEventListener("click", async () => {
   if (!idKeys || !idSig) return;
   await withBusy($("id-verify"), async () => {
@@ -234,86 +512,42 @@ $("id-verify").addEventListener("click", async () => {
     const t0 = performance.now();
     const ok = verify(idKeys.public_key, enc.encode($("id-msg").value), idSig);
     const ms = (performance.now() - t0).toFixed(0);
-    show(
-      $("id-out"),
+    show($("id-out"),
       $("id-out").innerHTML.replace(/<span class="proof">[\s\S]*$/, "") +
-        `\n\n<span class="${ok ? "ok" : "bad"}">signature valid: ${ok}</span>` +
-        (await proofLine(ms))
+      `\n\n<span class="${ok ? "ok" : "bad"}">signature valid: ${ok}</span>` +
+      (await proofLine(ms))
     );
     ledger("ed25519 verify", ms, 0, 0);
   });
 });
 
-// ── Scenario 2: Envelope ──────────────────────────────────────────────
-let envSalt = null; // generated after WASM init
-let envBlob = null;
-$("env-enc").addEventListener("click", async () => {
-  const pass = $("env-pass").value;
-  if (!pass) {
-    show($("env-out"), `<span class="bad">Enter a passphrase first.</span>`);
-    return;
-  }
-  await withBusy($("env-enc"), async () => {
-    proofMark();
-    const t0 = performance.now();
-    const out = JSON.parse(envelope_encrypt(pass, envSalt, enc.encode($("env-msg").value)));
-    const ms = (performance.now() - t0).toFixed(0);
-    envBlob = out;
-    $("env-dec").disabled = false;
-    show(
-      $("env-out"),
-      `<span class="dim"># Argon2id KDF + XChaCha20-Poly1305, all local</span>\n` +
-        `<span class="k">nonce</span>       ${out.nonce}\n` +
-        `<span class="k">ciphertext</span>  (ORGN envelope)\n` +
-        hexdump(out.ciphertext) +
-        `\n\n<span class="dim">Change the passphrase and try to decrypt — the AEAD tag will refuse.</span>` +
-        (await proofLine(ms))
-    );
-    ledger("envelope encrypt (argon2id + xchacha20)", ms, 0, 0);
-  });
-});
-$("env-dec").addEventListener("click", async () => {
-  if (!envBlob) return;
-  await withBusy($("env-dec"), async () => {
-    proofMark();
-    const t0 = performance.now();
-    let html;
-    try {
-      const pt = envelope_decrypt($("env-pass").value, envSalt, envBlob.nonce, envBlob.ciphertext);
-      const ms = (performance.now() - t0).toFixed(0);
-      html = `<span class="ok">✓ decrypted successfully</span>\n\n<span class="k">plaintext</span>\n${esc(pt)}` + (await proofLine(ms));
-      ledger("envelope decrypt", ms, 0, 0);
-    } catch (e) {
-      const ms = (performance.now() - t0).toFixed(0);
-      html = `<span class="bad">✗ decryption refused: ${esc(String(e))}</span>\n<span class="dim">Wrong passphrase or tampered ciphertext — the AEAD tag caught it.</span>` + (await proofLine(ms));
-      ledger("envelope decrypt (refused)", ms, 0, 0);
-    }
-    show($("env-out"), html);
-  });
-});
-
-// ── Scenario 3: Shards ────────────────────────────────────────────────
-const DATA = 3;
-const PARITY = 2;
+// ═══ TAB 4: Share ═══════════════════════════════════════════════════
 let shardState = null;
+
 $("sh-split").addEventListener("click", async () => {
   await withBusy($("sh-split"), async () => {
     proofMark();
     const t0 = performance.now();
-    const out = JSON.parse(shard_split(enc.encode($("sh-msg").value), DATA, PARITY));
+    const data = parseInt($("sh-data").value) || 3;
+    const parity = parseInt($("sh-parity").value) || 2;
+    const out = JSON.parse(shard_split(enc.encode($("sh-msg").value), data, parity));
     const ms = (performance.now() - t0).toFixed(0);
-    shardState = { shards: out.shards, original_len: out.original_len, present: out.shards.map(() => true) };
+    shardState = { shards: out.shards, original_len: out.original_len, present: out.shards.map(() => true), data, parity };
     renderChips();
     $("sh-recover").disabled = false;
     $("sh-hint").textContent = "click shards to lose them, then recover";
-    show(
-      $("sh-out"),
-      `<span class="dim"># Split into ${DATA + PARITY} shards. Any ${DATA} can recover the secret.</span>` +
-        (await proofLine(ms))
+    show($("sh-out"),
+      `<span class="ok">✓ Split into ${data + parity} shards</span>\n\n` +
+      `<span class="k">data</span>      ${data} shards required\n` +
+      `<span class="k">parity</span>    ${parity} recovery shards\n` +
+      `<span class="k">total</span>     ${data + parity} shards\n\n` +
+      `<span class="dim">Any ${data} shards can recover the secret. Click to simulate loss.</span>` +
+      (await proofLine(ms))
     );
-    ledger("reed-solomon split (3+2)", ms, 0, 0);
+    ledger(`reed-solomon split (${data}+${parity})`, ms, 0, 0);
   });
 });
+
 function renderChips() {
   const wrap = $("sh-chips");
   wrap.innerHTML = "";
@@ -329,6 +563,7 @@ function renderChips() {
     wrap.appendChild(chip);
   });
 }
+
 $("sh-recover").addEventListener("click", async () => {
   if (!shardState) return;
   await withBusy($("sh-recover"), async () => {
@@ -338,20 +573,22 @@ $("sh-recover").addEventListener("click", async () => {
     const arr = shardState.shards.map((h, i) => (shardState.present[i] ? h : null));
     let html;
     try {
-      const recovered = shard_recover(JSON.stringify(arr), shardState.original_len, DATA, PARITY);
+      const recovered = shard_recover(JSON.stringify(arr), shardState.original_len, shardState.data, shardState.parity);
       const ms = (performance.now() - t0).toFixed(0);
-      html = `<span class="ok">✓ recovered from ${presentCount}/${DATA + PARITY} shards</span>\n\n<span class="k">secret</span>  ${esc(recovered)}` + (await proofLine(ms));
-      ledger(`reed-solomon recover (${presentCount}/${DATA + PARITY})`, ms, 0, 0);
+      html = `<span class="ok">✓ Recovered from ${presentCount}/${shardState.data + shardState.parity} shards</span>\n\n` +
+        `<span class="k">secret</span>  ${esc(recovered)}` + (await proofLine(ms));
+      ledger(`reed-solomon recover (${presentCount}/${shardState.data + shardState.parity})`, ms, 0, 0);
     } catch (e) {
       const ms = (performance.now() - t0).toFixed(0);
-      html = `<span class="bad">✗ cannot recover — ${presentCount} present, need ${DATA}</span>\n<span class="dim">${esc(String(e))}</span>` + (await proofLine(ms));
+      html = `<span class="bad">✗ Cannot recover — ${presentCount} present, need ${shardState.data}</span>\n` +
+        `<span class="dim">${esc(String(e))}</span>` + (await proofLine(ms));
       ledger(`reed-solomon recover (failed, ${presentCount} shards)`, ms, 0, 0);
     }
     show($("sh-out"), html);
   });
 });
 
-// ── Scenario 4: Entropy ───────────────────────────────────────────────
+// ═══ TAB 5: Entropy ═════════════════════════════════════════════════
 async function runEntropy() {
   const data = enc.encode($("en-input").value);
   if (data.length === 0) {
@@ -377,13 +614,11 @@ async function runEntropy() {
         `<div class="metric-hint">${note}</div>`;
     })
     .join("");
-  show(
-    $("en-out"),
+  show($("en-out"),
     `<span class="dim"># ${m.length} bytes · ${m.unique_bytes} unique · longest run ${m.longest_run} · serial corr ${m.serial_correlation.toFixed(3)}</span>\n` +
-      bars +
-      (await proofLine(ms))
+    bars +
+    (await proofLine(ms))
   );
-  // animate bars after paint
   requestAnimationFrame(() => {
     $("en-out").querySelectorAll(".bar span").forEach((s) => (s.style.width = s.dataset.w + "%"));
   });
@@ -407,20 +642,7 @@ $("en-sample-high").addEventListener("click", () => {
   runEntropy();
 });
 
-// ── Envelope artifact (opening visual — real ciphertext, live) ────────
-function renderEnvelopeArt() {
-  try {
-    const nonce = random_salt() + random_salt().slice(0, 16); // 24-byte nonce display
-    const ct = JSON.parse(envelope_encrypt("demo", envSalt, enc.encode("sovereignty")));
-    $("ea-nonce").textContent = "nonce " + ct.nonce.slice(0, 16) + "…";
-    const bytes = ct.ciphertext.match(/.{1,2}/g) || [];
-    $("ea-body").innerHTML = bytes
-      .map((b, i) => `<span class="ea-byte${i % 7 === 0 ? " hot" : ""}" style="animation-delay:${i * 14}ms">${b}</span>`)
-      .join(" ");
-  } catch { /* art is decorative; never block the page on it */ }
-}
-
-// ── Integrity: hash the executed bytes, cross-check the manifest ──────
+// ── Integrity: hash the executed bytes, cross-check the manifest ────
 async function sha256hex(buf) {
   const h = await crypto.subtle.digest("SHA-256", buf);
   return [...new Uint8Array(h)].map((b) => b.toString(16).padStart(2, "0")).join("");
@@ -436,15 +658,8 @@ async function verifyBuild(wasmBytes) {
   } catch { /* local dev without build-info */ }
   if (manifest) {
     $("v-manifest").textContent = JSON.stringify(
-      {
-        git_commit: manifest.git_commit,
-        built_at: manifest.built_at,
-        sdk_version: manifest.sdk_version,
-        wasm_sha256: manifest.wasm_sha256,
-        ci_run_url: manifest.ci_run_url || "(local build)",
-      },
-      null,
-      2
+      { git_commit: manifest.git_commit, built_at: manifest.built_at, sdk_version: manifest.sdk_version, wasm_sha256: manifest.wasm_sha256, ci_run_url: manifest.ci_run_url || "(local build)" },
+      null, 2
     );
     $("v-repro").innerHTML = $("v-repro").innerHTML.replace("&lt;commit-from-manifest&gt;", manifest.git_commit_short || manifest.git_commit);
     const status = $("v-status");
@@ -461,27 +676,20 @@ async function verifyBuild(wasmBytes) {
   }
 }
 
-// ── Boot ──────────────────────────────────────────────────────────────
+// ── Boot ────────────────────────────────────────────────────────────
 async function main() {
-  renderConsole(); // "loading engine…"
+  renderConsole();
 
-  // Fetch the engine bytes ourselves so we can hash the EXACT buffer we
-  // execute. (This fetch is counted — it's one of the two engine fetches.)
   const wasmUrl = new URL("pkg/origin_web_bg.wasm", import.meta.url);
   const wasmBytes = await (await origFetch(wasmUrl)).arrayBuffer();
   initSync({ module: wasmBytes });
 
-  // Engine is live. From this instant, ANY network request is a violation.
   engineLoaded = true;
   store.baseline = storageBytes();
   await auditStorage();
 
-  // Salt + visual artifact now that WASM is ready.
-  envSalt = random_salt();
-  $("env-salt").textContent = `salt: ${envSalt}`;
-  renderEnvelopeArt();
+  encSalt = random_salt();
 
-  // Service-worker check (expect zero — this page registers none).
   try {
     $("c-sw-n").textContent = String((await navigator.serviceWorker.getRegistrations()).length);
   } catch {
@@ -489,26 +697,17 @@ async function main() {
   }
 
   renderConsole();
-  verifyBuild(wasmBytes); // async cross-check, updates console + verify section
+  verifyBuild(wasmBytes);
 
-  // Continuous storage audit — catches any delayed write.
   setInterval(async () => {
     await auditStorage();
     renderConsole();
   }, 2000);
 
   console.log(
-    "%corigin%cweb — engine loaded. Network after load: 0. Storage written: 0 B. Check the ledger.",
-    "color:#41d98d;font-weight:bold",
-    "color:#8a978f"
+    "%corigin-crypt%c — sovereign crypto, client-side only. View source: github.com/KidIkaros/origin-web",
+    "color:#41d98d;font-weight:bold", "color:inherit"
   );
 }
-
-// ── Scroll reveal ─────────────────────────────────────────────────────
-const io = new IntersectionObserver(
-  (entries) => entries.forEach((e) => e.isIntersecting && e.target.classList.add("in")),
-  { threshold: 0.12 }
-);
-document.querySelectorAll(".reveal").forEach((el) => io.observe(el));
 
 main();
