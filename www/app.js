@@ -19,9 +19,6 @@ import {
   shard_recover,
   entropy_analyze,
   random_salt,
-  password_strength,
-  generate_password,
-  blake3_hash,
 } from "./pkg/origin_web.js";
 
 // ── 0. ARM MONITORS — before anything else ──────────────────────────
@@ -415,6 +412,20 @@ $("vault-unlock").addEventListener("click", async () => {
     for (const e of entries) {
       try { decryptEntry(e); decrypted++; } catch { /* wrong passphrase or corrupt */ }
     }
+    // If entries exist but none decrypt, the passphrase is wrong
+    if (entries.length > 0 && decrypted === 0) {
+      vaultPass = null;
+      vaultSalt = null;
+      const ms = (performance.now() - t0).toFixed(0);
+      show($("vault-out"),
+        `<span class="bad">✗ Wrong passphrase — 0 of ${entries.length} entries decrypted</span>\n\n` +
+        `<span class="dim">The vault contains ${entries.length} encrypted entries. ` +
+        `Your passphrase did not unlock any of them.</span>` +
+        (await proofLine(ms))
+      );
+      ledger("vault unlock (refused)", ms, 0, 0);
+      return;
+    }
     const ms = (performance.now() - t0).toFixed(0);
     $("vault-unlock").disabled = true;
     $("vault-lock").disabled = false;
@@ -469,17 +480,37 @@ async function renderVaultList() {
   list.innerHTML = "";
   for (const e of entries) {
     let value = "••••••••";
+    let revealed = false;
     try { value = decryptEntry(e); } catch { value = "(decrypt error)"; }
     const row = document.createElement("div");
     row.className = "vault-row";
     row.innerHTML =
       `<span class="vault-name">${esc(e.name)}</span>` +
-      `<code class="vault-value">${esc(value)}</code>` +
+      `<code class="vault-value" data-revealed="false">${esc("••••••••")}</code>` +
+      `<button class="btn small vault-reveal" data-name="${esc(e.name)}">show</button>` +
       `<button class="btn small vault-copy" data-name="${esc(e.name)}">copy</button>` +
       `<button class="btn small danger vault-del" data-name="${esc(e.name)}">✕</button>`;
     list.appendChild(row);
   }
-  // Wire buttons
+  // Wire reveal buttons
+  list.querySelectorAll(".vault-reveal").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const entry = (await vaultGetAll()).find((e) => e.name === btn.dataset.name);
+      if (!entry) return;
+      const valEl = btn.parentElement.querySelector(".vault-value");
+      const isRevealed = valEl.dataset.revealed === "true";
+      if (isRevealed) {
+        valEl.textContent = "••••••••";
+        valEl.dataset.revealed = "false";
+        btn.textContent = "show";
+      } else {
+        try { valEl.textContent = decryptEntry(entry); } catch { valEl.textContent = "(decrypt error)"; }
+        valEl.dataset.revealed = "true";
+        btn.textContent = "hide";
+      }
+    });
+  });
+  // Wire copy buttons
   list.querySelectorAll(".vault-copy").forEach((btn) => {
     btn.addEventListener("click", async () => {
       const entry = (await vaultGetAll()).find((e) => e.name === btn.dataset.name);
@@ -645,8 +676,12 @@ async function runEntropy() {
   ledger(`entropy analyze (${m.length} B)`, ms, 0, 0);
 }
 $("en-run").addEventListener("click", runEntropy);
+let entropyTimer = null;
 $("en-input").addEventListener("input", () => {
-  if ($("en-input").value.length > 0) runEntropy();
+  if ($("en-input").value.length > 0) {
+    clearTimeout(entropyTimer);
+    entropyTimer = setTimeout(runEntropy, 300);
+  }
 });
 $("en-sample-low").addEventListener("click", () => {
   $("en-input").value = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";

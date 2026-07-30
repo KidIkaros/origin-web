@@ -7,6 +7,7 @@
   <meta name="description" content="Encrypt files, manage passwords, sign messages, share secrets — all client-side. No server. No account. No trust required.">
   <link rel="stylesheet" href="style.css">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🔐</text></svg>">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; worker-src 'none'; object-src 'none'; base-uri 'self'; form-action 'none';">
 </head>
 <body>
 <div class="bg"></div>
@@ -224,10 +225,17 @@ sha256sum pkg/origin_web_bg.wasm</pre>
 </main>
 
 <footer class="footer">
-  <span>origin-crypt · built on <a href="https://github.com/KidIcaros/OriginSDK">origin-crypto-sdk</a> · Apache-2.0</span>
+  <span>origin-crypt · built on <a href="https://github.com/KidIkaros/origin-crypt">origin-crypto-sdk</a> · Apache-2.0</span>
   <span>zero external requests · zero telemetry · zero trust</span>
 </footer>
 
 <script type="module" src="app.js"></script>
+<noscript>
+  <div style="max-width:600px;margin:80px auto;padding:40px;font-family:monospace;color:#9ba0a8;text-align:center;">
+    <h2 style="color:#e6edf0;">JavaScript required</h2>
+    <p>origin-crypt is a client-side WASM application — all cryptography runs in your browser.</p>
+    <p>No server, no account, no telemetry. Enable JavaScript to use the tool.</p>
+  </div>
+</noscript>
 </body>
 </html>

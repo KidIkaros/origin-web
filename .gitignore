@@ -18,3 +18,9 @@ node_modules/
 .idea/
 .vscode/
 test.mjs
+
+# Prototype leftovers (Phase 1 teaser, superseded by tool UI)
+www/proto.html
+www/proto.css
+www/proto.js
+www/proto-stream-worker.js
