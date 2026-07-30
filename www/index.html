@@ -73,7 +73,7 @@
   <section class="panel tool-panel" id="tab-vault">
     <div class="panel-header">
       <h2>Password Vault</h2>
-      <span class="panel-tag">AES-256-GCM · IndexedDB · zero-knowledge</span>
+      <span class="panel-tag">XChaCha20-Poly1305 · Argon2id · IndexedDB</span>
     </div>
     <div class="tool-grid">
       <div class="tool-input">
@@ -95,9 +95,9 @@
         </div>
       </div>
       <div class="tool-output">
-        <pre class="output" id="vault-out"><span class="dim"># Your vault is encrypted with AES-256-GCM and stored in IndexedDB.
+        <pre class="output" id="vault-out"><span class="dim"># Your vault is encrypted with XChaCha20-Poly1305 + Argon2id and stored in IndexedDB.
 # The encryption key is derived from your passphrase — never stored.
-# Close the tab and the key is gone. Reopen and unlock to access entries.</span></pre>
+# Close the tab and the passphrase is gone. Reopen and unlock to access entries.</span></pre>
       </div>
     </div>
   </section>

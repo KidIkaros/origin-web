@@ -3,7 +3,7 @@
 //
 // Architecture: WASM crypto engine (origin-crypto-sdk) runs entirely in-tab.
 // Network + storage monitors prove nothing leaves the browser.
-// Vault uses IndexedDB with AES-256-GCM (Web Crypto) for at-rest encryption.
+// Vault uses IndexedDB with XChaCha20-Poly1305 + Argon2id (WASM) for at-rest encryption.
 
 import {
   initSync,
@@ -318,25 +318,18 @@ function downloadBlob(blob, name) {
 // ═══ TAB 2: Vault ═══════════════════════════════════════════════════
 const VAULT_DB = "origin-vault";
 const VAULT_STORE = "entries";
-let vaultKey = null;
-let vaultIv = null;
-
-async function deriveVaultKey(passphrase) {
-  const keyMaterial = await crypto.subtle.importKey("raw", enc.encode(passphrase), "PBKDF2", false, ["deriveKey"]);
-  const salt = enc.encode("origin-vault-v1"); // fixed salt — the passphrase is the secret
-  return crypto.subtle.deriveKey(
-    { name: "PBKDF2", salt, iterations: 100000, hash: "SHA-256" },
-    keyMaterial,
-    { name: "AES-GCM", length: 256 },
-    false,
-    ["encrypt", "decrypt"]
-  );
-}
+const VAULT_META = "meta";
+let vaultPass = null;
+let vaultSalt = null;
 
 function openVaultDB() {
   return new Promise((resolve, reject) => {
-    const req = indexedDB.open(VAULT_DB, 1);
-    req.onupgradeneeded = () => req.result.createObjectStore(VAULT_STORE, { keyPath: "name" });
+    const req = indexedDB.open(VAULT_DB, 2);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(VAULT_STORE)) db.createObjectStore(VAULT_STORE, { keyPath: "name" });
+      if (!db.objectStoreNames.contains(VAULT_META)) db.createObjectStore(VAULT_META, { keyPath: "key" });
+    };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
   });
@@ -372,17 +365,34 @@ async function vaultDelete(name) {
   });
 }
 
-async function encryptEntry(value) {
-  const iv = crypto.getRandomValues(new Uint8Array(12));
-  const ct = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, vaultKey, enc.encode(value));
-  return { iv: [...iv], data: [...new Uint8Array(ct)] };
+async function vaultGetMeta(key) {
+  const db = await openVaultDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(VAULT_META, "readonly");
+    const req = tx.objectStore(VAULT_META).get(key);
+    req.onsuccess = () => resolve(req.result?.value ?? null);
+    req.onerror = () => reject(req.error);
+  });
 }
 
-async function decryptEntry(entry) {
-  const iv = new Uint8Array(entry.iv);
-  const data = new Uint8Array(entry.data);
-  const pt = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, vaultKey, data);
-  return dec.decode(pt);
+async function vaultPutMeta(key, value) {
+  const db = await openVaultDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(VAULT_META, "readwrite");
+    tx.objectStore(VAULT_META).put({ key, value });
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+function encryptEntry(value) {
+  const json = envelope_encrypt(vaultPass, vaultSalt, enc.encode(value));
+  const { nonce, ciphertext } = JSON.parse(json);
+  return { nonce, ciphertext };
+}
+
+function decryptEntry(entry) {
+  return envelope_decrypt(vaultPass, vaultSalt, entry.nonce, entry.ciphertext);
 }
 
 $("vault-unlock").addEventListener("click", async () => {
@@ -391,12 +401,19 @@ $("vault-unlock").addEventListener("click", async () => {
   proofMark();
   const t0 = performance.now();
   try {
-    vaultKey = await deriveVaultKey(pass);
+    // Load or create salt (stored alongside vault — it's not secret, the passphrase is)
+    let salt = await vaultGetMeta("salt");
+    if (!salt) {
+      salt = random_salt();
+      await vaultPutMeta("salt", salt);
+    }
+    vaultPass = pass;
+    vaultSalt = salt;
     // Test decrypt — try to read existing entries
     const entries = await vaultGetAll();
     let decrypted = 0;
     for (const e of entries) {
-      try { await decryptEntry(e); decrypted++; } catch { /* wrong key or corrupt */ }
+      try { decryptEntry(e); decrypted++; } catch { /* wrong passphrase or corrupt */ }
     }
     const ms = (performance.now() - t0).toFixed(0);
     $("vault-unlock").disabled = true;
@@ -406,26 +423,29 @@ $("vault-unlock").addEventListener("click", async () => {
       `<span class="ok">✓ Vault unlocked</span>\n\n` +
       `<span class="k">entries</span>   ${entries.length}\n` +
       `<span class="k">decryptable</span> ${decrypted}\n` +
-      `<span class="k">cipher</span>    AES-256-GCM\n` +
-      `<span class="k">kdf</span>       PBKDF2-SHA256 (100k iterations)\n` +
+      `<span class="k">cipher</span>    XChaCha20-Poly1305\n` +
+      `<span class="k">kdf</span>       Argon2id\n` +
       `<span class="k">storage</span>   IndexedDB (encrypted at rest)\n\n` +
-      `<span class="dim">The key exists only in memory. Lock or close the tab to destroy it.</span>` +
+      `<span class="dim">The passphrase exists only in memory. Lock or close the tab to destroy it.</span>` +
       (await proofLine(ms))
     );
     ledger("vault unlock", ms, 0, 0);
     renderVaultList();
   } catch (e) {
+    vaultPass = null;
+    vaultSalt = null;
     show($("vault-out"), `<span class="bad">✗ ${esc(String(e))}</span>`);
   }
 });
 
 $("vault-lock").addEventListener("click", () => {
-  vaultKey = null;
+  vaultPass = null;
+  vaultSalt = null;
   $("vault-unlock").disabled = false;
   $("vault-lock").disabled = true;
   $("vault-entries").hidden = true;
   $("vault-pass").value = "";
-  show($("vault-out"), `<span class="dim"># Vault locked. Key destroyed.</span>`);
+  show($("vault-out"), `<span class="dim"># Vault locked. Passphrase destroyed.</span>`);
 });
 
 $("vault-add").addEventListener("click", async () => {
@@ -434,7 +454,7 @@ $("vault-add").addEventListener("click", async () => {
   if (!name || !secret) return;
   proofMark();
   const t0 = performance.now();
-  const encrypted = await encryptEntry(secret);
+  const encrypted = encryptEntry(secret);
   await vaultPut({ name, ...encrypted });
   const ms = (performance.now() - t0).toFixed(0);
   $("vault-name").value = "";
@@ -449,7 +469,7 @@ async function renderVaultList() {
   list.innerHTML = "";
   for (const e of entries) {
     let value = "••••••••";
-    try { value = await decryptEntry(e); } catch { value = "(decrypt error)"; }
+    try { value = decryptEntry(e); } catch { value = "(decrypt error)"; }
     const row = document.createElement("div");
     row.className = "vault-row";
     row.innerHTML =
@@ -464,7 +484,7 @@ async function renderVaultList() {
     btn.addEventListener("click", async () => {
       const entry = (await vaultGetAll()).find((e) => e.name === btn.dataset.name);
       if (entry) {
-        const val = await decryptEntry(entry);
+        const val = decryptEntry(entry);
         navigator.clipboard.writeText(val);
         btn.textContent = "✓";
         setTimeout(() => (btn.textContent = "copy"), 1500);
