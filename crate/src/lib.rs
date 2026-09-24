@@ -32,7 +32,7 @@ fn err(e: impl std::fmt::Display) -> JsError {
 /// BLAKE3 hash of the input, returned as hex.
 #[wasm_bindgen]
 pub fn blake3_hash(data: &[u8]) -> String {
-    hex::encode(blake3::hash(data).as_bytes())
+    hex::encode(origin_crypto_sdk::blake3::hash(data).as_bytes())
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -45,34 +45,35 @@ pub fn blake3_hash(data: &[u8]) -> String {
 /// The secret key is born in this tab. It is returned to JS only so the demo
 /// can sign with it; it never leaves the page.
 #[wasm_bindgen]
-pub fn keygen() -> String {
-    use ed25519_dalek::SigningKey;
-    use rand::rngs::OsRng;
-    let sk = SigningKey::generate(&mut OsRng);
+pub fn keygen() -> Result<String, JsError> {
+    let mut seed = [0u8; 32];
+    origin_crypto_sdk::fill_random(&mut seed).map_err(err)?;
+    let sk = origin_crypto_sdk::Ed25519SigningKey::from_bytes(&seed);
     let pk = sk.verifying_key();
-    serde_json::json!({
+    Ok(serde_json::json!({
         "public_key": hex::encode(pk.as_bytes()),
         "secret_key": hex::encode(sk.to_bytes()),
     })
-    .to_string()
+    .to_string())
 }
 
 /// Sign `message` with a hex-encoded Ed25519 secret key. Returns signature hex.
 #[wasm_bindgen]
 pub fn sign(secret_key_hex: &str, message: &[u8]) -> Result<String, JsError> {
-    use ed25519_dalek::{Signer, SigningKey};
+    use origin_crypto_sdk::signing::hybrid::Signer;
     let sk_bytes = hex::decode(secret_key_hex).map_err(err)?;
     let sk_arr: [u8; 32] = sk_bytes
         .try_into()
         .map_err(|_| JsError::new("secret key must be 32 bytes (64 hex chars)"))?;
-    let sk = SigningKey::from_bytes(&sk_arr);
+    let sk = origin_crypto_sdk::Ed25519SigningKey::from_bytes(&sk_arr);
     Ok(hex::encode(sk.sign(message).to_bytes()))
 }
 
 /// Verify a hex-encoded Ed25519 signature. Returns true/false.
 #[wasm_bindgen]
 pub fn verify(public_key_hex: &str, message: &[u8], signature_hex: &str) -> bool {
-    use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+    use origin_crypto_sdk::signing::hybrid::Verifier;
+    use origin_crypto_sdk::{Ed25519Signature as Signature, Ed25519VerifyingKey as VerifyingKey};
     let Ok(pk_bytes) = hex::decode(public_key_hex) else {
         return false;
     };
@@ -101,7 +102,7 @@ pub fn verify(public_key_hex: &str, message: &[u8], signature_hex: &str) -> bool
 #[wasm_bindgen]
 pub fn identity_fingerprint(secret_key_hex: &str) -> Result<String, JsError> {
     let sk_bytes = hex::decode(secret_key_hex).map_err(err)?;
-    let hash = blake3::hash(&sk_bytes);
+    let hash = origin_crypto_sdk::blake3::hash(&sk_bytes);
     Ok(hex::encode(hash.as_bytes()))
 }
 
@@ -115,7 +116,11 @@ pub fn identity_fingerprint(secret_key_hex: &str) -> Result<String, JsError> {
 /// This is the real SDK envelope path: passphrase -> Argon2id -> 32-byte key
 /// -> XChaCha20-Poly1305. No key material ever leaves the tab.
 #[wasm_bindgen]
-pub fn envelope_encrypt(passphrase: &str, salt_hex: &str, plaintext: &[u8]) -> Result<String, JsError> {
+pub fn envelope_encrypt(
+    passphrase: &str,
+    salt_hex: &str,
+    plaintext: &[u8],
+) -> Result<String, JsError> {
     use origin_crypto_sdk::{Argon2id, XChaCha20Poly1305};
     let salt_bytes = hex::decode(salt_hex).map_err(err)?;
     let salt: [u8; 16] = salt_bytes
@@ -123,7 +128,7 @@ pub fn envelope_encrypt(passphrase: &str, salt_hex: &str, plaintext: &[u8]) -> R
         .map_err(|_| JsError::new("salt must be 16 bytes (32 hex chars)"))?;
 
     let key = Argon2id::derive_key(passphrase.as_bytes(), &salt, false).map_err(err)?;
-    let nonce = origin_crypto_sdk::aead::generate_nonce();
+    let nonce = origin_crypto_sdk::aead::try_generate_nonce().map_err(err)?;
     let ct = XChaCha20Poly1305::encrypt(&key, &nonce, plaintext).map_err(err)?;
 
     Ok(serde_json::json!({
@@ -160,9 +165,9 @@ pub fn envelope_decrypt(
 
 /// Generate a fresh random salt (16 bytes) as hex, from browser entropy.
 #[wasm_bindgen]
-pub fn random_salt() -> String {
-    let salt = origin_crypto_sdk::aead::generate_key(); // 32 bytes; take 16
-    hex::encode(&salt[..16])
+pub fn random_salt() -> Result<String, JsError> {
+    let salt = origin_crypto_sdk::aead::try_generate_key().map_err(err)?; // 32 bytes; take 16
+    Ok(hex::encode(&salt[..16]))
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -172,7 +177,11 @@ pub fn random_salt() -> String {
 /// Split `secret` into `data_shards + parity_shards` shards.
 /// Returns JSON: { "shards": [hex, ...], "original_len": n }.
 #[wasm_bindgen]
-pub fn shard_split(secret: &[u8], data_shards: usize, parity_shards: usize) -> Result<String, JsError> {
+pub fn shard_split(
+    secret: &[u8],
+    data_shards: usize,
+    parity_shards: usize,
+) -> Result<String, JsError> {
     use origin_crypto_sdk::error_correction::ReedSolomonCodec;
     let codec = ReedSolomonCodec::new(data_shards, parity_shards);
     let shards = codec.encode_shards(secret).map_err(err)?;
@@ -188,7 +197,12 @@ pub fn shard_split(secret: &[u8], data_shards: usize, parity_shards: usize) -> R
 /// `present_hex` is a JSON array where each entry is either a hex shard string
 /// or null (for a lost shard), in shard order. `original_len` is required.
 #[wasm_bindgen]
-pub fn shard_recover(present_json: &str, original_len: usize, data_shards: usize, parity_shards: usize) -> Result<String, JsError> {
+pub fn shard_recover(
+    present_json: &str,
+    original_len: usize,
+    data_shards: usize,
+    parity_shards: usize,
+) -> Result<String, JsError> {
     use origin_crypto_sdk::error_correction::ReedSolomonCodec;
     let parsed: Vec<Option<String>> = serde_json::from_str(present_json).map_err(err)?;
     let shards: Vec<Option<Vec<u8>>> = parsed
@@ -244,7 +258,7 @@ pub fn file_encrypt(passphrase: &str, salt_hex: &str, data: &[u8]) -> Result<Vec
         .try_into()
         .map_err(|_| JsError::new("salt must be 16 bytes (32 hex chars)"))?;
     let key = Argon2id::derive_key(passphrase.as_bytes(), &salt, false).map_err(err)?;
-    let nonce = origin_crypto_sdk::aead::generate_nonce();
+    let nonce = origin_crypto_sdk::aead::try_generate_nonce().map_err(err)?;
     let ct = XChaCha20Poly1305::encrypt(&key, &nonce, data).map_err(err)?;
     let mut blob = Vec::with_capacity(24 + ct.len());
     blob.extend_from_slice(&nonce);
@@ -257,7 +271,9 @@ pub fn file_encrypt(passphrase: &str, salt_hex: &str, data: &[u8]) -> Result<Vec
 pub fn file_decrypt(passphrase: &str, salt_hex: &str, blob: &[u8]) -> Result<Vec<u8>, JsError> {
     use origin_crypto_sdk::{Argon2id, XChaCha20Poly1305};
     if blob.len() < 25 {
-        return Err(JsError::new("blob too short — need at least nonce + 1 byte"));
+        return Err(JsError::new(
+            "blob too short — need at least nonce + 1 byte",
+        ));
     }
     let salt_bytes = hex::decode(salt_hex).map_err(err)?;
     let salt: [u8; 16] = salt_bytes
@@ -280,12 +296,28 @@ pub fn file_decrypt(passphrase: &str, salt_hex: &str, blob: &[u8]) -> Result<Vec
 pub fn password_strength(password: &str) -> String {
     let len = password.len();
     let mut variety = 0u32;
-    if password.chars().any(|c| c.is_ascii_lowercase()) { variety += 1; }
-    if password.chars().any(|c| c.is_ascii_uppercase()) { variety += 1; }
-    if password.chars().any(|c| c.is_ascii_digit()) { variety += 1; }
-    if password.chars().any(|c| !c.is_ascii_alphanumeric()) { variety += 1; }
+    if password.chars().any(|c| c.is_ascii_lowercase()) {
+        variety += 1;
+    }
+    if password.chars().any(|c| c.is_ascii_uppercase()) {
+        variety += 1;
+    }
+    if password.chars().any(|c| c.is_ascii_digit()) {
+        variety += 1;
+    }
+    if password.chars().any(|c| !c.is_ascii_alphanumeric()) {
+        variety += 1;
+    }
 
-    let len_score = if len >= 16 { 3 } else if len >= 12 { 2 } else if len >= 8 { 1 } else { 0 };
+    let len_score = if len >= 16 {
+        3
+    } else if len >= 12 {
+        2
+    } else if len >= 8 {
+        1
+    } else {
+        0
+    };
     let score = variety + len_score;
 
     let label = match score {
@@ -297,10 +329,18 @@ pub fn password_strength(password: &str) -> String {
     };
 
     let mut hints = Vec::new();
-    if len < 8 { hints.push("use at least 8 characters"); }
-    if len < 12 { hints.push("12+ characters recommended"); }
-    if variety < 3 { hints.push("mix upper, lower, digits, symbols"); }
-    if password.chars().any(|c| c.is_whitespace()) { hints.push("avoid whitespace"); }
+    if len < 8 {
+        hints.push("use at least 8 characters");
+    }
+    if len < 12 {
+        hints.push("12+ characters recommended");
+    }
+    if variety < 3 {
+        hints.push("mix upper, lower, digits, symbols");
+    }
+    if password.chars().any(|c| c.is_whitespace()) {
+        hints.push("avoid whitespace");
+    }
 
     serde_json::json!({
         "score": score,
@@ -315,8 +355,7 @@ pub fn password_strength(password: &str) -> String {
 /// Generate a cryptographically random password.
 /// `length` is clamped to [8, 128]. `use_symbols` includes !@#$%^&* etc.
 #[wasm_bindgen]
-pub fn generate_password(length: u32, use_symbols: bool) -> String {
-    use rand::RngCore;
+pub fn generate_password(length: u32, use_symbols: bool) -> Result<String, JsError> {
     let len = length.clamp(8, 128) as usize;
     let lower = b"abcdefghijklmnopqrstuvwxyz";
     let upper = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ";
@@ -330,31 +369,29 @@ pub fn generate_password(length: u32, use_symbols: bool) -> String {
         charset.extend_from_slice(symbols);
     }
 
-    let mut rng = rand::rngs::OsRng;
-    let mut buf = [0u8; 1];
-    let mut password = String::with_capacity(len);
+    // One CSPRNG draw covers required-class picks, the password body, and
+    // splice positions: 4 + len + 4 bytes.
+    let mut rnd = vec![0u8; len + 8];
+    origin_crypto_sdk::fill_random(&mut rnd).map_err(err)?;
 
     // Guarantee at least one of each required class
     let mut required: Vec<u8> = Vec::new();
-    required.push(lower[rng.next_u32() as usize % lower.len()]);
-    required.push(upper[rng.next_u32() as usize % upper.len()]);
-    required.push(digits[rng.next_u32() as usize % digits.len()]);
+    required.push(lower[rnd[0] as usize % lower.len()]);
+    required.push(upper[rnd[1] as usize % upper.len()]);
+    required.push(digits[rnd[2] as usize % digits.len()]);
     if use_symbols {
-        required.push(symbols[rng.next_u32() as usize % symbols.len()]);
+        required.push(symbols[rnd[3] as usize % symbols.len()]);
     }
 
-    for _ in 0..len {
-        rng.fill_bytes(&mut buf);
-        password.push(charset[buf[0] as usize % charset.len()] as char);
-    }
+    let mut chars: Vec<char> = (0..len)
+        .map(|i| charset[rnd[4 + i] as usize % charset.len()] as char)
+        .collect();
 
     // Splice in the required chars at random positions
-    let mut chars: Vec<char> = password.chars().collect();
-    for (i, &rc) in required.iter().enumerate() {
-        let pos = (rng.next_u32() as usize) % chars.len();
+    for (j, &rc) in required.iter().enumerate() {
+        let pos = rnd[4 + len + j] as usize % chars.len();
         chars[pos] = rc as char;
-        let _ = i;
     }
 
-    chars.into_iter().collect()
+    Ok(chars.into_iter().collect())
 }

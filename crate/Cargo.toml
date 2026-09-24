@@ -7,6 +7,9 @@
 # access). For local SDK iteration, uncomment the [patch] at the bottom to
 # redirect to the sibling checkout.
 
+# Standalone crate with its own workspace root.
+[workspace]
+
 [package]
 name = "origin-web"
 version = "0.1.0"
@@ -22,16 +25,14 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 # The real crypto. crates.io source + wasm feature (browser entropy via Web Crypto).
-origin-crypto-sdk = { version = "0.6.6", features = ["wasm"] }
+origin-crypto-sdk = { version = "0.7.1-rc.10", features = ["wasm"] }
 
 # WASM <-> JS glue.
 wasm-bindgen = "0.2"
 js-sys = "0.3"
 
-# Standalone primitives used directly in the teaser.
-blake3 = "1.8"
-ed25519-dalek = { version = "2", features = ["rand_core"] }
-rand = "0.8"
+# All primitives come from origin-crypto-sdk (blake3 / Ed25519 re-exports,
+# fill_random) — no standalone crypto deps.
 hex = "0.4"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -48,5 +49,5 @@ lto = true
 codegen-units = 1
 
 # --- LOCAL DEV OVERRIDE (uncomment to iterate on the SDK without publishing) ---
-# [patch.crates-io]
-# origin-crypto-sdk = { path = "../../origin-crypto-sdk" }
+[patch.crates-io]
+origin-crypto-sdk = { path = "../../origin-crypto-sdk" }
